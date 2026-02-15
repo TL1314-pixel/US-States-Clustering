@@ -1,0 +1,166 @@
+---
+title: "finalcode_kmeans"
+format: html
+execute:
+  echo: true
+  warning: false
+  message: false
+editor: visual
+fig-width: 6
+fig-asp: 0.618
+fig-align: center
+out-width: "70%"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Unsupervised Learning
+
+### preparing
+
+```{r}
+library(tidyverse)
+library(sf)
+library(spData)
+library(dplyr)
+library(ggplot2)
+library(tmap)
+library(clValid)
+library(mclust)
+library(NbClust)
+
+data(us_states)
+
+hlth  <- read.csv("FinalData.csv")
+rownames(hlth) <- hlth$NAME
+# drop Puerto Rico
+hlth <- hlth %>% filter(NAME != "Puerto Rico")
+```
+
+```{r}
+# to minimize the difference, we log-transformed the total population
+hlth_clean <- hlth %>%
+  mutate(logPop = log(TotPop)) %>%
+  select(logPop, AgingPer, PovPer, DisPer, UnempPer,
+         HICPer, PSEPer, MGR, WhitePer, MHI)
+```
+
+```{r}
+# Scale the data
+Xsc <- scale(hlth_clean)
+```
+
+K-means showed stronger stability on AD, FOM. Therefore, we chose k-means for final modeling.
+
+```{r}
+# choose the number of clusters
+
+# combine three plots into one image for better presentation
+# par(mfrow = c(1, 3), 
+    # cex.main = 2,         
+    # cex.lab  = 1.5,        
+    # cex.axis = 1.5)
+
+# Elbow plot
+Ks <- 1:10
+wcss <- numeric(length(Ks))
+for (k in Ks) {
+  km <- kmeans(Xsc, centers = k, nstart = 50, iter.max = 100)
+  wcss[k] <- km$tot.withinss
+  }
+plot(Ks, wcss, type = "b", pch = 19,
+     xlab = "K (clusters)", ylab = "Total within-cluster SS (WCSS)",
+     main = "Elbow Plot")
+
+# # set seed for reproducibility
+set.seed(1314)
+
+# compute the gap statistic
+gap <- clusGap(Xsc, FUN = kmeans, K.max = 10, B = 100, 
+               nstart = 50, iter.max = 100)
+
+# plot the statistic 
+plot(gap, main = "Gap statistic", xlab = "K (clusters)")
+
+# Fit final k-means at chosen K and visualize in first two PCs
+Kstar <- maxSE(gap$Tab[, "gap"], gap$Tab[, "SE.sim"], 
+               method = "Tibs2001SEmax")
+Kstar
+
+# Silhouette method
+Ks2 <- 2:10
+avg_sil <- numeric(length(Ks2))
+dmat <- dist(Xsc, method = "euclidean")
+
+# compute Silhouette method 
+for (i in seq_along(Ks2)) {
+  k <- Ks2[i]
+  km <- kmeans(Xsc, centers = k, nstart = 50, iter.max = 100)
+  sil <- silhouette(km$cluster, dmat)
+  avg_sil[i] <- mean(sil[, "sil_width"])
+}
+
+# plot the method 
+plot(Ks2, avg_sil, type = "b", pch = 19, 
+     xlab = "K (clusters)", ylab = "Average silhouette width", 
+     main = "Silhouette Diagnostic")
+
+# find the max average silhouette width 
+Ks2[which.max(avg_sil)]
+```
+
+```{r}
+# Compare clustering algorithms in R at k = 3
+clmethods <- c("hierarchical","kmeans","model")
+stab <- clValid(Xsc, nClust = 3, clMethods = clmethods, validation = "stability")
+optimalScores(stab) %>%
+  kable(caption = "comparing clustering algorithms by Stability measures at k = 3", 
+        digits = 2) %>%
+  kable_styling(
+    # add lines to the table
+    bootstrap_options = c("striped", "bordered"),  
+    full_width = FALSE,
+    position = "center"
+  )
+```
+
+```{r}
+# Using 3 clusters
+k_means_results <- kmeans(Xsc, centers = 3, nstart = 50)
+hlth_clean <- hlth_clean %>% mutate(cluster = k_means_results$cluster)
+cluster_states <- split(hlth$NAME, hlth_clean$cluster)
+
+#table of centers
+cluster_center <- as.data.frame(k_means_results$centers)
+cluster_center$Cluster <- paste0(rownames(cluster_center))
+cluster_center <- cluster_center %>% select(Cluster, everything())
+knitr::kable(cluster_center, digits = 3, caption = "Cluster Centers for K-means (k = 3)")
+
+# table of states
+cluster_state <- data.frame(
+  Cluster = paste0("Cluster ", names(cluster_states)),
+  States  = sapply(cluster_states, function(x) paste(x, collapse = ", "))
+)
+
+knitr::kable(cluster_state,
+      caption = "States Belonging to Each Cluster",
+      longtable = TRUE) 
+```
+
+```{r}
+set.seed(1314)
+
+# Spatial Data Visualization
+hlth$cluster <- factor(k_means_results$cluster)
+us_map <- us_states %>%
+  left_join(hlth, by = "NAME")
+ggplot(us_map) +
+  geom_sf(aes(fill = cluster), color = "white", size = 0.2) +
+  scale_fill_brewer(palette = "YlGnBu", name = "Cluster") +
+  labs(
+    title = "K-means Clustering of U.S. States (k = 3)"
+  ) +
+  theme_minimal()
+```
